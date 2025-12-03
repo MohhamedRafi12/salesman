@@ -12,6 +12,7 @@ def load_xy(filename):
             cols = line.split()
             # use only first two columns as floats
             data.append([float(cols[0]), float(cols[1])])
+    data.append(data[0]) # close the path from the last to the 1st city
     return np.array(data)
 
 def load_polygons(filename):
@@ -66,7 +67,7 @@ def make_plot(infile,optfile=None,region="NA"):
         ax.plot(poly[:,0], poly[:,1], color="black", lw=0.8)
 
     # Plot original city order (thin line)
-    ax.plot(cities_orig[:,0], cities_orig[:,1], lw=1, color="gray", alpha=0.5)
+    ax.plot(cities_orig[:,0], cities_orig[:,1], lw=1, color="red", alpha=0.5)
 
     # Plot salesman path (lines + points)
     if optfile: ax.plot(cities_out[:,0], cities_out[:,1],
