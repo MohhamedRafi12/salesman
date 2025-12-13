@@ -35,7 +35,7 @@ run1k: $(TARGET)
 run2k: $(TARGET)
 	./$(TARGET) $(DATA_2K) $(SEED)
 	python $(PLOT) $(DATA_2K) best_route_2k.dat \
-		-s schedule_2k.csv --save-png --no-show
+		-s schedule_2k.csv --save-png -w --no-show
 
 clean:
 	rm -f $(TARGET) \
