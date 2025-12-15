@@ -42,4 +42,4 @@ clean:
 	      best_route_*.dat \
 	      schedule_*.csv \
 	      an*.png \
-	      *.o
+	      *.o *.pdf

@@ -1,12 +1,23 @@
+// tsp_sa.cpp
+// TSP via: Nearest-Neighbor baseline + (gentle) Metropolis melt + Simulated Annealing (2-opt)
+// Adds: multi-start SA (run several independent SA attempts, keep best)
+// Prints: NN distance vs best SA distance (and improvement %)
+// Writes:
+//   nn_route_<tag>.dat
+//   best_route_<tag>.dat
+//   schedule_<tag>.csv   (for the BEST SA run only)
+//
 // Build: g++ -O3 -std=c++17 tsp_sa.cpp -o tsp_sa
-// Run:   ./tsp_sa cities23.dat 1
+// Run:   ./tsp_sa cities150.dat 1
+//        ./tsp_sa cities1k.dat  1
+//        ./tsp_sa cities2k.dat  1
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <chrono>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -135,16 +146,72 @@ void apply_2opt(std::vector<int>& tour, int i, int j) {
     std::reverse(tour.begin() + i, tour.begin() + j + 1);
 }
 
-struct SAConfig {
-    // Melt stage (high-T Metropolis)
-    double T_melt = 8000.0;
-    int melt_steps = 30000;
+// -------------------------
+// Nearest-neighbor baseline
+// -------------------------
 
-    // Anneal schedule
-    double T0 = 4000.0;
+std::vector<int> nearest_neighbor_tour(const std::vector<std::vector<double>>& D, int start = 0) {
+    const int n = (int)D.size();
+    std::vector<int> tour;
+    tour.reserve(n);
+
+    std::vector<char> used(n, 0);
+    int cur = start;
+    used[cur] = 1;
+    tour.push_back(cur);
+
+    for (int step = 1; step < n; step++) {
+        int best_j = -1;
+        double best_d = 1e300;
+
+        for (int j = 0; j < n; j++) {
+            if (used[j]) continue;
+            const double d = D[cur][j];
+            if (d < best_d) {
+                best_d = d;
+                best_j = j;
+            }
+        }
+
+        cur = best_j;
+        used[cur] = 1;
+        tour.push_back(cur);
+    }
+
+    return tour;
+}
+
+// Try all starts and keep best (O(n^2), OK for n<=2000)
+std::vector<int> nearest_neighbor_best_start(const std::vector<std::vector<double>>& D) {
+    const int n = (int)D.size();
+    std::vector<int> bestTour;
+    double bestL = 1e300;
+
+    for (int s = 0; s < n; s++) {
+        auto t = nearest_neighbor_tour(D, s);
+        const double L = tour_length(D, t);
+        if (L < bestL) {
+            bestL = L;
+            bestTour = std::move(t);
+        }
+    }
+    return bestTour;
+}
+
+// -------------------------
+// Metropolis + SA
+// -------------------------
+
+struct SAConfig {
+    // Gentle melt (so we don't destroy NN structure)
+    double T_melt = 500.0;
+    int melt_steps = 5000;
+
+    // Anneal schedule (geometric cooling)
+    double T0 = 2000.0;
     double Tmin = 1e-2;
-    double alpha = 0.995;     // T <- alpha*T
-    int steps_per_T = 3000;   // Metropolis steps at each T
+    double alpha = 0.995;
+    int steps_per_T = 3000;
 };
 
 bool metropolis_accept(double dE, double T, std::mt19937& rng) {
@@ -159,14 +226,12 @@ std::pair<int,int> propose_2opt(int n, std::mt19937& rng) {
     int i = U(rng), j = U(rng);
     if (i > j) std::swap(i, j);
 
-    // avoid tiny/no-op
     if (j - i < 2) {
         std::uniform_int_distribution<int> Ui(0, n - 3);
         i = Ui(rng);
         std::uniform_int_distribution<int> Uj(i + 2, n - 1);
         j = Uj(rng);
     }
-    // avoid full reversal (same cycle)
     if (i == 0 && j == n - 1) { i = 1; j = n - 2; }
     return {i, j};
 }
@@ -175,6 +240,8 @@ std::pair<double,double> melt(const std::vector<std::vector<double>>& D,
                               std::vector<int>& tour,
                               const SAConfig& cfg,
                               std::mt19937& rng) {
+    if (cfg.melt_steps <= 0) return {tour_length(D, tour), 0.0};
+
     double L = tour_length(D, tour);
     int accept = 0;
     const int n = (int)tour.size();
@@ -234,7 +301,6 @@ anneal_with_schedule(const std::vector<std::vector<double>>& D,
                 if (curL < bestL) { bestL = curL; best = cur; }
             }
         }
-        // record point after finishing this temperature block
         sched.push_back(SchedulePoint{T, bestL, curL});
         T *= cfg.alpha;
     }
@@ -253,13 +319,11 @@ void write_route_lonlat(const std::string& out,
         const auto& c = cities[idx];
         f << c.lon_deg << "\t" << c.lat_deg << "\t" << "\"" << c.name << "\"" << "\n";
     }
-    // close the loop
     const auto& c0 = cities[tour[0]];
     f << c0.lon_deg << "\t" << c0.lat_deg << "\t" << "\"" << c0.name << "\"" << "\n";
 }
 
 static inline std::string tag_from_filename(const std::string& file) {
-    // Simple heuristic for your requested tags
     if (file.find("150") != std::string::npos) return "150";
     if (file.find("1k")  != std::string::npos || file.find("1K") != std::string::npos ||
         file.find("1000")!= std::string::npos) return "1k";
@@ -269,18 +333,39 @@ static inline std::string tag_from_filename(const std::string& file) {
     return "run";
 }
 
+// A simple heuristic to pick SA effort by problem size
+static inline void tune_cfg_for_n(SAConfig& cfg, int n) {
+    if (n <= 200) {
+        cfg.T0 = 2000.0;
+        cfg.alpha = 0.995;
+        cfg.steps_per_T = 3000;
+        cfg.T_melt = 500.0;
+        cfg.melt_steps = 5000;
+    } else if (n <= 1200) { // ~1k
+        cfg.T0 = 2500.0;
+        cfg.alpha = 0.999;
+        cfg.steps_per_T = 20000;
+        cfg.T_melt = 300.0;
+        cfg.melt_steps = 8000;
+    } else { // ~2k
+        cfg.T0 = 3000.0;
+        cfg.alpha = 0.9995;
+        cfg.steps_per_T = 40000;
+        cfg.T_melt = 250.0;
+        cfg.melt_steps = 10000;
+    }
+}
+
 int main(int argc, char** argv) {
     auto t_start = std::chrono::high_resolution_clock::now();
 
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " cities23.dat [seed]\n";
+        std::cerr << "Usage: " << argv[0] << " cities.dat [seed]\n";
         return 1;
     }
     const std::string file = argv[1];
     unsigned int seed = 1;
-    if (argc >= 3) seed = (unsigned int)std::stoul(argv[2]);
-
-    SAConfig cfg; // tweak defaults here if desired
+    if (argc >= 3) seed = static_cast<unsigned int>(std::stoul(argv[2]));
 
     try {
         std::mt19937 rng(seed);
@@ -291,26 +376,78 @@ int main(int argc, char** argv) {
 
         auto D = build_distance_matrix(cities);
 
-        // initial random tour (cycle start doesn't matter)
-        std::vector<int> tour(n);
-        for (int i = 0; i < n; i++) tour[i] = i;
-        std::shuffle(tour.begin(), tour.end(), rng);
+        // ----------------------------------
+        // Initial tour = file order (0,1,2,...,N-1)
+        // ----------------------------------
+        std::vector<int> file_tour(n);
+        for (int i = 0; i < n; i++) file_tour[i] = i;
+
+        double Lfile = tour_length(D, file_tour);
 
         std::cout << std::fixed << std::setprecision(3);
-        std::cout << "Initial tour length: " << tour_length(D, tour) << " km\n";
+        std::cout << "Initial file-order tour length: "
+                << Lfile << " km\n";
 
-        auto [Lm, acc] = melt(D, tour, cfg, rng);
-        std::cout << "After melt: L=" << Lm << " km, accept~" << acc << "\n";
+        // Nearest Neighbor baseline (best start)
+        auto nn_tour = nearest_neighbor_best_start(D);
+        const double Lnn = tour_length(D, nn_tour);
 
-        auto [best_tour, bestL, sched] = anneal_with_schedule(D, tour, cfg, rng);
-        std::cout << "Best found: L=" << bestL << " km\n";
+        std::cout << std::fixed << std::setprecision(3);
+        std::cout << "Nearest-neighbor tour length: " << Lnn << " km\n";
 
+        // SA config tuned by size
+        SAConfig cfg;
+        tune_cfg_for_n(cfg, n);
+
+        // Multi-start SA: start from NN (so SA won't “start worse”),
+        // then do a gentle melt and anneal. Keep best run.
+        const int restarts = 5; // you can bump to 10 if you want extra robustness
+
+        std::vector<int> best_tour_overall;
+        double bestL_overall = 1e300;
+        std::vector<SchedulePoint> best_sched_overall;
+
+        for (int r = 0; r < restarts; r++) {
+            // Different RNG stream per restart
+            std::mt19937 rrng(seed + 1337u * (unsigned)r + 17u);
+
+            std::vector<int> tour = nn_tour; // IMPORTANT: start from NN
+            const double Linit = tour_length(D, tour);
+
+            auto [Lm, acc] = melt(D, tour, cfg, rrng);
+            auto [bt, bL, sched] = anneal_with_schedule(D, tour, cfg, rrng);
+
+            std::cout << "Run " << (r + 1) << "/" << restarts
+                      << " | init(NN)=" << Linit
+                      << " | after_melt=" << Lm
+                      << " (acc~" << acc << ")"
+                      << " | best(SA)=" << bL << " km\n";
+
+            if (bL < bestL_overall) {
+                bestL_overall = bL;
+                best_tour_overall = std::move(bt);
+                best_sched_overall = std::move(sched);
+            }
+        }
+
+        // Final comparison
+        std::cout << "----------------------------------------\n";
+        std::cout << "FINAL Comparison (lower is better):\n";
+        std::cout << "  Nearest Neighbor: " << Lnn << " km\n";
+        std::cout << "  Best SA (multi):  " << bestL_overall << " km\n";
+        std::cout << "  Improvement:      " << (Lnn - bestL_overall) << " km  ("
+                  << 100.0 * (Lnn - bestL_overall) / Lnn << "%)\n";
+        std::cout << "----------------------------------------\n";
+
+        // Write outputs for plotting (and schedule for best run)
         const std::string tag = tag_from_filename(file);
-        write_route_lonlat("best_route_" + tag + ".dat", cities, best_tour);
-        write_schedule_csv("schedule_" + tag + ".csv", sched);
+        write_route_lonlat("nn_route_" + tag + ".dat", cities, nn_tour);
+        write_route_lonlat("best_route_" + tag + ".dat", cities, best_tour_overall);
+        write_schedule_csv("schedule_" + tag + ".csv", best_sched_overall);
 
+        std::cout << "Wrote nn_route_" << tag << ".dat\n";
         std::cout << "Wrote best_route_" << tag << ".dat\n";
-        std::cout << "Wrote schedule_" << tag << ".csv\n";
+        std::cout << "Wrote schedule_" << tag << ".csv (best run)\n";
 
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
@@ -318,15 +455,9 @@ int main(int argc, char** argv) {
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();
-
     std::chrono::duration<double> elapsed = t_end - t_start;
-
-    std::cout << "----------------------------------------\n";
-    std::cout << "Total execution time: "
-              << elapsed.count() << " seconds\n";
-    std::cout << "----------------------------------------\n";
-
-    return 0;
+    std::cout << "Total execution time: " << std::fixed << std::setprecision(3)
+              << elapsed.count() << " s\n";
 
     return 0;
 }
