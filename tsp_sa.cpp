@@ -181,7 +181,6 @@ std::vector<int> nearest_neighbor_tour(const std::vector<std::vector<double>>& D
     return tour;
 }
 
-// Try all starts and keep best (O(n^2), OK for n<=2000)
 std::vector<int> nearest_neighbor_best_start(const std::vector<std::vector<double>>& D) {
     const int n = (int)D.size();
     std::vector<int> bestTour;
@@ -333,7 +332,7 @@ static inline std::string tag_from_filename(const std::string& file) {
     return "run";
 }
 
-// A simple heuristic to pick SA effort by problem size
+
 static inline void tune_cfg_for_n(SAConfig& cfg, int n) {
     if (n <= 200) {
         cfg.T0 = 2000.0;
@@ -399,9 +398,7 @@ int main(int argc, char** argv) {
         SAConfig cfg;
         tune_cfg_for_n(cfg, n);
 
-        // Multi-start SA: start from NN (so SA won't “start worse”),
-        // then do a gentle melt and anneal. Keep best run.
-        const int restarts = 5; // you can bump to 10 if you want extra robustness
+        const int restarts = 5; 
 
         std::vector<int> best_tour_overall;
         double bestL_overall = 1e300;
